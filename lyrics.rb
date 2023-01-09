@@ -9,7 +9,22 @@
 #-------------------- Krzysztof Baranski (c) 2020 ---------------------#
 #======================================================================#
 
-require 'cgi'
+require 'bundler/inline'
+
+gemfile do
+  source 'https://rubygems.org'
+  gem 'addressable'
+  gem 'colorize'
+  gem 'curses'
+  gem 'docopt'
+  gem 'genius', git: 'https://github.com/kkbaranski/genius'
+  gem 'json'
+  gem 'nokogiri'
+  gem 'pry'
+  gem 'taglib-ruby'
+end
+
+require 'addressable/uri'
 require 'colorize'
 require 'curses'
 require 'docopt'
@@ -86,8 +101,8 @@ class SongGenre
   private
 
   def self.build_url(song)
-    artist = CGI.escape(song.artist)
-    title = CGI.escape(song.title)
+    artist = Addressable::URI.escape(song.artist)
+    title = Addressable::URI.escape(song.title)
     "#{LAST_FM_URL}?method=track.gettoptags&artist=#{artist}&track=#{title}&api_key=#{LAST_FM_API_KEY}&autocorrect=1&format=json"
   end
 end
@@ -202,8 +217,10 @@ class GeniusSong < Lyrics
 
   def self.extract_lyrics(url)
     debug("Extracting lyrics from url: #{url}")
-    page = Nokogiri::HTML.parse(open(url))
-    lyrics = page.css('div.lyrics')&.text
+    page = Nokogiri::HTML.parse(URI.open(url))
+    page.css('br').each { |node| node.replace("\n") }
+    lyrics = page.css('div[data-lyrics-container]')&.text
+    debug("  lyrics='#{lyrics}'")
     lyrics&.strip&.gsub(/\n{3,}/, "\n\n")&.strip
   end
 end
@@ -233,13 +250,13 @@ class TekstowoSong < Lyrics
     debug("  song name: #{song.name}")
     url = build_url(song)
     debug("  url='#{url}'")
-    page = Nokogiri::HTML.parse(open(url))
+    page = Nokogiri::HTML.parse(URI.open(url))
 
     debug('Iterate over results:')
     min_distance = nil
     result_name = nil
     result_endpoint = nil
-    page.css('div.content > div.box-przeboje')&.first(10)&.each do |element|
+    page.css('div.content > * div.box-przeboje')&.first(10)&.each do |element|
       name = element&.css('a.title')&.attribute('title')&.value
       debug("- name: '#{name}'")
       next if name.nil? || name.empty? || !name.include?('-')
@@ -265,15 +282,15 @@ class TekstowoSong < Lyrics
   end
 
   def self.build_url(song)
-    artist = CGI.escape(song.artist)
-    title = CGI.escape(song.title)
+    artist = Addressable::URI.escape(song.artist)
+    title = Addressable::URI.escape(song.title)
     "#{PAGE_URL}/szukaj,wykonawca,#{artist},tytul,#{title}"
   end
 
   def self.extract_lyrics(url, song:)
     debug("Extracting lyrics from url: #{url}")
-    page = Nokogiri::HTML.parse(open(url))
-    lyrics = page.css('div.song-text > text()')&.text
+    page = Nokogiri::HTML.parse(URI.open(url))
+    lyrics = page.css('div.song-text > div.inner-text')&.text
     debug("  lyrics='#{lyrics&.strip}'")
     raise NotFound, song if lyrics.nil? || lyrics.empty?
 
@@ -376,6 +393,7 @@ end
 
 class LyricsPicker
   SkipError = Class.new(StandardError)
+  QuitError = Class.new(StandardError)
 
   COLORS = {
     lyrics1: 1,
@@ -464,6 +482,8 @@ class LyricsPicker
           @song.play
         when 's'
           @song.stop
+        when 'q'
+          raise QuitError
         end
       end
     end
@@ -494,10 +514,10 @@ class LyricsPicker
   end
 
   def draw_controls
-    t1 = "| ◀︎ | ▶︎ | ▲ | ▼ |#{' 🄴  |' if can_edit?} 🄿  | 🅂  |"
-    t2 = "| ◀︎ #{@current_lyrics_source.name.capitalize} | ▶︎ Original | ▲ Skip | ▼ Switch |#{' 🄴  |' if can_edit?} 🄿  | 🅂  |"
-    t3 = "| ◀︎ #{@current_lyrics_source.name.capitalize} | ▶︎ Original | ▲ Skip | ▼ Switch |#{' 🄴 dit |' if can_edit?} 🄿 lay | 🅂 top |"
-    t4 = "| ◀︎ Choose #{@current_lyrics_source.name.capitalize} | ▶︎ Keep Original | ▲ Skip | ▼ Change lyrics source |#{' 🄴  Edit ' + @current_lyrics_source.name.capitalize + ' lyrics |' if can_edit?} 🄿  Play audio | 🅂  Stop playing audio |"
+    t1 = "| ◀︎ | ▶︎ | ▲ | ▼ |#{' 🄴  |' if can_edit?} 🄿  | 🅂  | 🅀  |"
+    t2 = "| ◀︎ #{@current_lyrics_source.name.capitalize} | ▶︎ Original | ▲ Skip | ▼ Switch |#{' 🄴  |' if can_edit?} 🄿  | 🅂  | 🅀  |"
+    t3 = "| ◀︎ #{@current_lyrics_source.name.capitalize} | ▶︎ Original | ▲ Skip | ▼ Switch |#{' 🄴 dit |' if can_edit?} 🄿 lay | 🅂 top | 🅀 uit |"
+    t4 = "| ◀︎ Choose #{@current_lyrics_source.name.capitalize} | ▶︎ Keep Original | ▲ Skip | ▼ Change lyrics source |#{' 🄴  Edit ' + @current_lyrics_source.name.capitalize + ' lyrics |' if can_edit?} 🄿  Play audio | 🅂  Stop playing audio | 🅀  Quit |"
 
     text = case Curses.cols
     when 0...t2.length
@@ -527,7 +547,7 @@ class LyricsPicker
   end
 
   def edit_current_lyrics
-    return unless can_edit?
+    return unless can_edit? # install vipe (https://manpages.debian.org/jessie/moreutils/vipe.1.en.html): brew install moreutils
 
     new_lyrics = `printf #{Shellwords.escape(@current_lyrics.lyrics)} | vipe`.chomp
     @current_lyrics.lyrics = new_lyrics unless new_lyrics.empty?
@@ -580,6 +600,8 @@ end
 class FilesProcessor
   attr_accessor :play_mode, :skip_mode, :genre_mode
 
+  QuitError = Class.new(StandardError)
+
   LYRICS_SOURCES = [GeniusSong, TekstowoSong].freeze
 
   def initialize
@@ -595,6 +617,8 @@ class FilesProcessor
     items.each do |item|
       process_item(item)
     end
+  rescue QuitError
+    return
   end
 
   def print_skipped_files
@@ -679,6 +703,9 @@ class FilesProcessor
   rescue LyricsPicker::SkipError
     add_to_skipped(song.file)
     label :skipped, :yellow
+  rescue LyricsPicker::QuitError
+    label :quit, :red
+    raise QuitError
   ensure
     print song || file
     song&.stop
@@ -687,7 +714,7 @@ class FilesProcessor
   def seach_lyrics_in_source(song, source)
     source.search(song)
   rescue Lyrics::NotFound
-    nil
+    debug('Lyrics not found.')
   end
 
   def search_lyrics(song)
